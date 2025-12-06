@@ -7,7 +7,8 @@ LDFLAGS =
 TARGET  = echo
 
 # Source files (will be populated as implementation progresses)
-SRCS    = src/main.c
+SRCS    = src/main.c \
+          src/platform/posix.c
 OBJS    = $(SRCS:.c=.o)
 
 .PHONY: all clean test
@@ -22,6 +23,7 @@ $(TARGET): $(OBJS)
 
 clean:
 	rm -f $(TARGET) $(OBJS)
+	find src -name '*.o' -delete
 
 test:
 	@echo "No tests yet"
