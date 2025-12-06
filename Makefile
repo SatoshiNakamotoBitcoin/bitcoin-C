@@ -11,7 +11,8 @@ SRCS    = src/main.c \
           src/platform/posix.c \
           src/crypto/sha256.c \
           src/crypto/ripemd160.c \
-          src/crypto/secp256k1.c
+          src/crypto/secp256k1.c \
+          src/consensus/serialize.c
 OBJS    = $(SRCS:.c=.o)
 
 # Test files
@@ -22,6 +23,7 @@ TEST_SECP256K1_GROUP = test/unit/test_secp256k1_group
 TEST_ECDSA           = test/unit/test_ecdsa
 TEST_SCHNORR         = test/unit/test_schnorr
 TEST_SIG_VERIFY      = test/unit/test_sig_verify
+TEST_SERIALIZE       = test/unit/test_serialize
 
 .PHONY: all clean test
 
@@ -55,7 +57,10 @@ $(TEST_SCHNORR): test/unit/test_schnorr.c src/crypto/secp256k1.c src/crypto/sha2
 $(TEST_SIG_VERIFY): test/unit/test_sig_verify.c src/consensus/sig_verify.c src/crypto/secp256k1.c src/crypto/sha256.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY)
+$(TEST_SERIALIZE): test/unit/test_serialize.c src/consensus/serialize.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY) $(TEST_SERIALIZE)
 	@echo "Running SHA-256 tests..."
 	@./$(TEST_SHA256)
 	@echo ""
@@ -76,7 +81,10 @@ test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GRO
 	@echo ""
 	@echo "Running Signature Interface tests..."
 	@./$(TEST_SIG_VERIFY)
+	@echo ""
+	@echo "Running Serialization tests..."
+	@./$(TEST_SERIALIZE)
 
 clean:
-	rm -f $(TARGET) $(OBJS) $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY)
+	rm -f $(TARGET) $(OBJS) $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY) $(TEST_SERIALIZE)
 	find src -name '*.o' -delete
