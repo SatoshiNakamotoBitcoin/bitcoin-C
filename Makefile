@@ -13,7 +13,8 @@ SRCS    = src/main.c \
           src/crypto/ripemd160.c \
           src/crypto/secp256k1.c \
           src/consensus/serialize.c \
-          src/consensus/tx.c
+          src/consensus/tx.c \
+          src/consensus/block.c
 OBJS    = $(SRCS:.c=.o)
 
 # Test files
@@ -26,6 +27,7 @@ TEST_SCHNORR         = test/unit/test_schnorr
 TEST_SIG_VERIFY      = test/unit/test_sig_verify
 TEST_SERIALIZE       = test/unit/test_serialize
 TEST_TX              = test/unit/test_tx
+TEST_BLOCK           = test/unit/test_block
 
 .PHONY: all clean test
 
@@ -65,7 +67,10 @@ $(TEST_SERIALIZE): test/unit/test_serialize.c src/consensus/serialize.c
 $(TEST_TX): test/unit/test_tx.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY) $(TEST_SERIALIZE) $(TEST_TX)
+$(TEST_BLOCK): test/unit/test_block.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY) $(TEST_SERIALIZE) $(TEST_TX) $(TEST_BLOCK)
 	@echo "Running SHA-256 tests..."
 	@./$(TEST_SHA256)
 	@echo ""
@@ -92,7 +97,10 @@ test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GRO
 	@echo ""
 	@echo "Running Transaction tests..."
 	@./$(TEST_TX)
+	@echo ""
+	@echo "Running Block tests..."
+	@./$(TEST_BLOCK)
 
 clean:
-	rm -f $(TARGET) $(OBJS) $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY) $(TEST_SERIALIZE) $(TEST_TX)
+	rm -f $(TARGET) $(OBJS) $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY) $(TEST_SERIALIZE) $(TEST_TX) $(TEST_BLOCK)
 	find src -name '*.o' -delete
