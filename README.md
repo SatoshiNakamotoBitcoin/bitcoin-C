@@ -6,7 +6,7 @@ A complete, ossified implementation of the Bitcoin protocol in pure C.
 
 ## Status
 
-**Phase 2: Cryptographic Primitives** — Complete (110 tests passing)
+**Phase 3: Consensus Data Structures** — Complete (175 tests passing)
 
 | Component | Tests |
 |-----------|-------|
@@ -17,8 +17,12 @@ A complete, ossified implementation of the Bitcoin protocol in pure C.
 | ECDSA Verification | 17/17 |
 | Schnorr (BIP-340) | 20/20 |
 | Signature Interface | 13/13 |
+| Varint Encoding | 50/50 |
+| Transactions | 15/15 |
+| Blocks | 14/14 |
+| Merkle Trees | 15/15 |
 
-Next: Phase 3 — Consensus Data Structures
+Next: Phase 4 — Transaction Validation (Script Interpreter)
 
 ## Building
 
