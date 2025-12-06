@@ -10,12 +10,14 @@ TARGET  = echo
 SRCS    = src/main.c \
           src/platform/posix.c \
           src/crypto/sha256.c \
-          src/crypto/ripemd160.c
+          src/crypto/ripemd160.c \
+          src/crypto/secp256k1.c
 OBJS    = $(SRCS:.c=.o)
 
 # Test files
-TEST_SHA256    = test/unit/test_sha256
-TEST_RIPEMD160 = test/unit/test_ripemd160
+TEST_SHA256       = test/unit/test_sha256
+TEST_RIPEMD160    = test/unit/test_ripemd160
+TEST_SECP256K1_FE = test/unit/test_secp256k1_fe
 
 .PHONY: all clean test
 
@@ -34,13 +36,19 @@ $(TEST_SHA256): test/unit/test_sha256.c src/crypto/sha256.c
 $(TEST_RIPEMD160): test/unit/test_ripemd160.c src/crypto/ripemd160.c src/crypto/sha256.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-test: $(TEST_SHA256) $(TEST_RIPEMD160)
+$(TEST_SECP256K1_FE): test/unit/test_secp256k1_fe.c src/crypto/secp256k1.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE)
 	@echo "Running SHA-256 tests..."
 	@./$(TEST_SHA256)
 	@echo ""
 	@echo "Running RIPEMD-160 tests..."
 	@./$(TEST_RIPEMD160)
+	@echo ""
+	@echo "Running secp256k1 field tests..."
+	@./$(TEST_SECP256K1_FE)
 
 clean:
-	rm -f $(TARGET) $(OBJS) $(TEST_SHA256) $(TEST_RIPEMD160)
+	rm -f $(TARGET) $(OBJS) $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE)
 	find src -name '*.o' -delete
