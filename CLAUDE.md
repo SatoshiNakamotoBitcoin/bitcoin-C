@@ -21,6 +21,14 @@
 - Constants over magic numbers
 - Descriptive names over abbreviations
 
+## Context Loading Strategy
+
+To avoid context window limits and ensure focused implementation:
+1. **DO NOT read full source files (.c)** for completed modules unless you are modifying them.
+2. **Read `include/*.h`** to understand available APIs and types.
+3. **Read ONLY the specific `.c` file** you are currently working on.
+4. Treat other modules as **black boxes** based on their headers.
+
 ## Architecture Layers
 
 ```
