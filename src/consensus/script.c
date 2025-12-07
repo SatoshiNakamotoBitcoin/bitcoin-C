@@ -1416,6 +1416,7 @@ const char *script_error_string(script_error_t err)
         case SCRIPT_ERR_PUBKEYTYPE: return "Invalid public key type";
         case SCRIPT_ERR_SIG_BADLENGTH: return "Invalid signature length";
         case SCRIPT_ERR_SCHNORR_SIG: return "Invalid Schnorr signature";
+        case SCRIPT_ERR_SIG_PUSHONLY: return "scriptSig must be push-only";
         case SCRIPT_ERR_WITNESS_PROGRAM_WRONG_LENGTH: return "Wrong witness program length";
         case SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY: return "Witness program requires witness";
         case SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH: return "Witness program mismatch";
@@ -1423,10 +1424,12 @@ const char *script_error_string(script_error_t err)
         case SCRIPT_ERR_WITNESS_MALLEATED_P2SH: return "Witness malleated (P2SH)";
         case SCRIPT_ERR_WITNESS_UNEXPECTED: return "Unexpected witness";
         case SCRIPT_ERR_WITNESS_PUBKEYTYPE: return "Invalid witness public key type";
+        case SCRIPT_ERR_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM: return "Discouraged upgradable witness program";
         case SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE: return "Wrong taproot control size";
         case SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT: return "Tapscript validation weight exceeded";
         case SCRIPT_ERR_TAPSCRIPT_CHECKMULTISIG: return "CHECKMULTISIG not in tapscript";
         case SCRIPT_ERR_TAPSCRIPT_MINIMALIF: return "Tapscript requires minimal IF";
+        case SCRIPT_ERR_CLEANSTACK: return "Stack not clean after execution";
         case SCRIPT_ERR_OUT_OF_MEMORY: return "Out of memory";
         default: return "Unknown error";
     }
@@ -4202,6 +4205,326 @@ echo_result_t script_execute_tapscript(script_context_t *ctx,
         }
 
         pos += opcode_len;
+    }
+
+    return ECHO_OK;
+}
+
+
+/*
+ * ============================================================================
+ * P2SH EVALUATION (Session 4.7 — BIP-16)
+ * ============================================================================
+ */
+
+/*
+ * Check if a scriptSig is push-only.
+ *
+ * A push-only script contains only push opcodes:
+ * - OP_0 (0x00)
+ * - Direct pushes (0x01-0x4b)
+ * - OP_PUSHDATA1/2/4 (0x4c-0x4e)
+ * - OP_1NEGATE (0x4f)
+ * - OP_RESERVED (0x50) - treated as push
+ * - OP_1-OP_16 (0x51-0x60)
+ */
+echo_bool_t script_is_push_only(const uint8_t *script, size_t len)
+{
+    if (script == NULL && len > 0) {
+        return ECHO_FALSE;
+    }
+
+    size_t pos = 0;
+    while (pos < len) {
+        uint8_t op = script[pos++];
+
+        if (op == OP_0) {
+            /* OP_0 is a push (empty array) */
+            continue;
+        }
+
+        if (op >= 0x01 && op <= 0x4b) {
+            /* Direct push: op is the number of bytes to push */
+            if (pos + op > len) {
+                return ECHO_FALSE;  /* Truncated */
+            }
+            pos += op;
+            continue;
+        }
+
+        if (op == OP_PUSHDATA1) {
+            if (pos >= len) return ECHO_FALSE;
+            size_t push_len = script[pos++];
+            if (pos + push_len > len) return ECHO_FALSE;
+            pos += push_len;
+            continue;
+        }
+
+        if (op == OP_PUSHDATA2) {
+            if (pos + 2 > len) return ECHO_FALSE;
+            size_t push_len = script[pos] | ((size_t)script[pos + 1] << 8);
+            pos += 2;
+            if (pos + push_len > len) return ECHO_FALSE;
+            pos += push_len;
+            continue;
+        }
+
+        if (op == OP_PUSHDATA4) {
+            if (pos + 4 > len) return ECHO_FALSE;
+            size_t push_len = script[pos] | ((size_t)script[pos + 1] << 8) |
+                              ((size_t)script[pos + 2] << 16) | ((size_t)script[pos + 3] << 24);
+            pos += 4;
+            if (pos + push_len > len) return ECHO_FALSE;
+            pos += push_len;
+            continue;
+        }
+
+        if (op == OP_1NEGATE) {
+            /* OP_1NEGATE is a push */
+            continue;
+        }
+
+        if (op >= OP_1 && op <= OP_16) {
+            /* OP_1 through OP_16 are pushes */
+            continue;
+        }
+
+        /* Any other opcode is not push-only */
+        return ECHO_FALSE;
+    }
+
+    return ECHO_TRUE;
+}
+
+/*
+ * Extract the serialized redeem script from an executed scriptSig.
+ */
+echo_result_t script_get_redeem_script(const script_context_t *ctx,
+                                        const uint8_t **redeem_script,
+                                        size_t *redeem_len)
+{
+    if (ctx == NULL || redeem_script == NULL || redeem_len == NULL) {
+        return ECHO_ERR_NULL_PARAM;
+    }
+
+    if (stack_empty(&ctx->stack)) {
+        return ECHO_ERR_SCRIPT_STACK;
+    }
+
+    const stack_element_t *top;
+    echo_result_t res = stack_peek(&ctx->stack, &top);
+    if (res != ECHO_OK) {
+        return res;
+    }
+
+    *redeem_script = top->data;
+    *redeem_len = top->len;
+    return ECHO_OK;
+}
+
+/*
+ * Verify a P2SH (Pay to Script Hash) script.
+ *
+ * P2SH evaluation (BIP-16):
+ * 1. Check scriptSig is push-only (if SIGPUSHONLY flag set)
+ * 2. Execute scriptSig — leaves data items on stack including redeem script
+ * 3. The top stack element is the serialized redeem script
+ * 4. Verify HASH160(redeem_script) == script_hash
+ * 5. If redeem script is a witness program (P2SH-P2WPKH or P2SH-P2WSH),
+ *    delegate to SegWit verification
+ * 6. Otherwise, pop redeem script and execute it with remaining stack
+ */
+echo_result_t script_verify_p2sh(script_context_t *ctx,
+                                  const uint8_t *script_sig,
+                                  size_t script_sig_len,
+                                  const uint8_t script_hash[20],
+                                  const uint8_t *witness_data,
+                                  size_t witness_len)
+{
+    if (ctx == NULL || script_hash == NULL) {
+        return ECHO_ERR_NULL_PARAM;
+    }
+
+    /* Empty scriptSig is invalid for P2SH */
+    if (script_sig == NULL || script_sig_len == 0) {
+        ctx->error = SCRIPT_ERR_EVAL_FALSE;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /*
+     * Step 1: Check scriptSig is push-only (BIP-16 requirement)
+     * This is always required for P2SH, not just when SIGPUSHONLY is set
+     */
+    if (!script_is_push_only(script_sig, script_sig_len)) {
+        ctx->error = SCRIPT_ERR_SIG_PUSHONLY;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /*
+     * Step 2: Execute scriptSig
+     * This should push the redeem script (and any other data) onto the stack
+     */
+    echo_result_t res = script_execute(ctx, script_sig, script_sig_len);
+    if (res != ECHO_OK) {
+        return res;
+    }
+
+    /* Stack must not be empty after scriptSig execution */
+    if (stack_empty(&ctx->stack)) {
+        ctx->error = SCRIPT_ERR_EVAL_FALSE;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /*
+     * Step 3: Extract the redeem script (top of stack)
+     */
+    const uint8_t *redeem_script;
+    size_t redeem_len;
+    res = script_get_redeem_script(ctx, &redeem_script, &redeem_len);
+    if (res != ECHO_OK) {
+        return res;
+    }
+
+    /*
+     * Step 4: Verify HASH160(redeem_script) == script_hash
+     */
+    uint8_t computed_hash[20];
+    hash160(redeem_script, redeem_len, computed_hash);
+    if (memcmp(computed_hash, script_hash, 20) != 0) {
+        ctx->error = SCRIPT_ERR_EQUALVERIFY;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /*
+     * Step 5: Check if redeem script is a witness program (P2SH-SegWit)
+     *
+     * If the redeem script is:
+     * - OP_0 <20 bytes>: P2SH-P2WPKH
+     * - OP_0 <32 bytes>: P2SH-P2WSH
+     * Then delegate to SegWit verification
+     */
+    witness_program_t witness_prog;
+    if ((ctx->flags & SCRIPT_VERIFY_WITNESS) &&
+        script_is_witness_program(redeem_script, redeem_len, &witness_prog)) {
+
+        /* For P2SH-SegWit, the stack should only have the redeem script */
+        if (stack_size(&ctx->stack) != 1) {
+            ctx->error = SCRIPT_ERR_WITNESS_MALLEATED_P2SH;
+            return ECHO_ERR_SCRIPT_ERROR;
+        }
+
+        /* Pop the redeem script (we've verified it) */
+        stack_element_t redeem_elem;
+        stack_pop(&ctx->stack, &redeem_elem);
+
+        /* Witness must be present for SegWit */
+        if (witness_data == NULL || witness_len == 0) {
+            element_free(&redeem_elem);
+            ctx->error = SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY;
+            return ECHO_ERR_SCRIPT_ERROR;
+        }
+
+        if (witness_prog.version == WITNESS_VERSION_0) {
+            if (witness_prog.program_len == 20) {
+                /* P2SH-P2WPKH */
+                res = script_verify_p2wpkh(ctx, witness_data, witness_len,
+                                            witness_prog.program);
+            } else if (witness_prog.program_len == 32) {
+                /* P2SH-P2WSH */
+                res = script_verify_p2wsh(ctx, witness_data, witness_len,
+                                           witness_prog.program);
+            } else {
+                ctx->error = SCRIPT_ERR_WITNESS_PROGRAM_WRONG_LENGTH;
+                res = ECHO_ERR_SCRIPT_ERROR;
+            }
+        } else {
+            /* Unknown witness version in P2SH context */
+            if (ctx->flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM) {
+                ctx->error = SCRIPT_ERR_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM;
+                res = ECHO_ERR_SCRIPT_ERROR;
+            } else {
+                /* Future witness versions succeed by default */
+                res = ECHO_OK;
+            }
+        }
+
+        element_free(&redeem_elem);
+        return res;
+    }
+
+    /*
+     * Step 6: Regular P2SH (not SegWit-wrapped)
+     *
+     * Make a copy of the redeem script before we pop it,
+     * then pop it and execute with remaining stack.
+     */
+
+    /* Copy the redeem script since we need it after popping */
+    uint8_t *redeem_copy = NULL;
+    if (redeem_len > 0) {
+        redeem_copy = malloc(redeem_len);
+        if (redeem_copy == NULL) {
+            ctx->error = SCRIPT_ERR_OUT_OF_MEMORY;
+            return ECHO_ERR_OUT_OF_MEMORY;
+        }
+        memcpy(redeem_copy, redeem_script, redeem_len);
+    }
+    size_t redeem_copy_len = redeem_len;
+
+    /* Pop the redeem script from stack */
+    stack_element_t redeem_elem;
+    res = stack_pop(&ctx->stack, &redeem_elem);
+    if (res != ECHO_OK) {
+        free(redeem_copy);
+        return res;
+    }
+    element_free(&redeem_elem);
+
+    /* Check redeem script size limit */
+    if (redeem_copy_len > SCRIPT_MAX_SIZE) {
+        free(redeem_copy);
+        ctx->error = SCRIPT_ERR_SCRIPT_SIZE;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /* Set the redeem script as script_code for sighash computation */
+    ctx->script_code = redeem_copy;
+    ctx->script_code_len = redeem_copy_len;
+    ctx->codesep_pos = 0;
+
+    /*
+     * Execute the redeem script with remaining stack
+     * The op_count carries over from scriptSig execution
+     */
+    res = script_execute(ctx, redeem_copy, redeem_copy_len);
+    free(redeem_copy);
+
+    if (res != ECHO_OK) {
+        return res;
+    }
+
+    /* After P2SH execution, stack must have exactly one true element */
+    if (stack_empty(&ctx->stack)) {
+        ctx->error = SCRIPT_ERR_EVAL_FALSE;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /* Check the final result */
+    const stack_element_t *top;
+    res = stack_peek(&ctx->stack, &top);
+    if (res != ECHO_OK) {
+        return res;
+    }
+
+    if (!script_bool(top->data, top->len)) {
+        ctx->error = SCRIPT_ERR_EVAL_FALSE;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /* Clean stack check for P2SH */
+    if ((ctx->flags & SCRIPT_VERIFY_CLEANSTACK) && stack_size(&ctx->stack) != 1) {
+        ctx->error = SCRIPT_ERR_CLEANSTACK;
+        return ECHO_ERR_SCRIPT_ERROR;
     }
 
     return ECHO_OK;

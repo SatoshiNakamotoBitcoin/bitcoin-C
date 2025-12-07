@@ -513,6 +513,7 @@ typedef enum {
     SCRIPT_ERR_PUBKEYTYPE,
     SCRIPT_ERR_SIG_BADLENGTH,
     SCRIPT_ERR_SCHNORR_SIG,
+    SCRIPT_ERR_SIG_PUSHONLY,
 
     /* SegWit errors */
     SCRIPT_ERR_WITNESS_PROGRAM_WRONG_LENGTH,
@@ -522,6 +523,7 @@ typedef enum {
     SCRIPT_ERR_WITNESS_MALLEATED_P2SH,
     SCRIPT_ERR_WITNESS_UNEXPECTED,
     SCRIPT_ERR_WITNESS_PUBKEYTYPE,
+    SCRIPT_ERR_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM,
 
     /* Taproot errors */
     SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE,
@@ -1654,5 +1656,79 @@ echo_result_t script_verify_taproot_scriptpath(script_context_t *ctx,
 echo_result_t script_execute_tapscript(script_context_t *ctx,
                                         const uint8_t *script,
                                         size_t len);
+
+
+/*
+ * ============================================================================
+ * P2SH EVALUATION (Session 4.7 — BIP-16)
+ * ============================================================================
+ */
+
+/*
+ * Verify a P2SH (Pay to Script Hash) script.
+ *
+ * P2SH evaluation (BIP-16):
+ * 1. Execute scriptSig — must leave serialized redeem script on stack
+ * 2. Copy the stack for redeem script execution
+ * 3. Verify HASH160(redeem_script) == script_hash
+ * 4. Execute redeem script with remaining stack
+ * 5. For P2SH-wrapped SegWit, delegate to SegWit verification
+ *
+ * The scriptSig must be push-only when SCRIPT_VERIFY_SIGPUSHONLY is set.
+ *
+ * Parameters:
+ *   ctx            - Script context with transaction set
+ *   script_sig     - The scriptSig (unlocking script)
+ *   script_sig_len - Length of scriptSig
+ *   script_hash    - 20-byte script hash from scriptPubKey
+ *   witness_data   - Witness data (for P2SH-SegWit, may be NULL)
+ *   witness_len    - Length of witness data
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_SCRIPT_* on verification failure
+ */
+echo_result_t script_verify_p2sh(script_context_t *ctx,
+                                  const uint8_t *script_sig,
+                                  size_t script_sig_len,
+                                  const uint8_t script_hash[20],
+                                  const uint8_t *witness_data,
+                                  size_t witness_len);
+
+/*
+ * Check if a scriptSig is push-only.
+ *
+ * A push-only script contains only push opcodes (OP_0, OP_1-OP_16,
+ * OP_1NEGATE, direct pushes 0x01-0x4b, OP_PUSHDATA1/2/4).
+ *
+ * BIP-16 requires scriptSig to be push-only for P2SH.
+ *
+ * Parameters:
+ *   script - Script bytes
+ *   len    - Script length
+ *
+ * Returns:
+ *   ECHO_TRUE if push-only, ECHO_FALSE otherwise
+ */
+echo_bool_t script_is_push_only(const uint8_t *script, size_t len);
+
+/*
+ * Extract the serialized redeem script from an executed scriptSig.
+ *
+ * After executing a P2SH scriptSig, the top stack element contains
+ * the serialized redeem script. This function extracts it.
+ *
+ * Parameters:
+ *   ctx           - Script context after executing scriptSig
+ *   redeem_script - Output: pointer to redeem script data
+ *   redeem_len    - Output: length of redeem script
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_SCRIPT_STACK if stack is empty
+ */
+echo_result_t script_get_redeem_script(const script_context_t *ctx,
+                                        const uint8_t **redeem_script,
+                                        size_t *redeem_len);
 
 #endif /* ECHO_SCRIPT_H */
