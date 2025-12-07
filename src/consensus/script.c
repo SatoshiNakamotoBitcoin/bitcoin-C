@@ -10,6 +10,7 @@
 
 #include "script.h"
 #include "sha256.h"
+#include "sha1.h"
 #include "ripemd160.h"
 #include "sig_verify.h"
 #include "secp256k1.h"
@@ -2462,10 +2463,20 @@ echo_result_t script_exec_op(script_context_t *ctx, const script_op_t *op)
         return stack_push(&ctx->stack, hash, RIPEMD160_DIGEST_SIZE);
     }
 
-    /* OP_SHA1: Disabled in practice, but technically valid */
+    /* OP_SHA1: Hash top element with SHA-1 */
     if (opcode == OP_SHA1) {
-        /* SHA-1 is not implemented in Bitcoin Echo; it's obsolete and insecure */
-        return script_set_error(ctx, SCRIPT_ERR_BAD_OPCODE);
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        stack_element_t elem;
+        echo_result_t res = stack_pop(&ctx->stack, &elem);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        uint8_t hash[SHA1_DIGEST_SIZE];
+        sha1(elem.data, elem.len, hash);
+        if (elem.data) free(elem.data);
+        return stack_push(&ctx->stack, hash, SHA1_DIGEST_SIZE);
     }
 
     /* OP_SHA256: Hash top element with SHA-256 */
@@ -2728,10 +2739,16 @@ echo_result_t script_exec_op(script_context_t *ctx, const script_op_t *op)
         if (dummy.data) free(dummy.data);
 
         /*
+         * Signature verification logic:
+         *
          * Without transaction context, we cannot verify signatures.
-         * Result is false (verification fails).
+         * However, if n_sigs == 0, verification succeeds vacuously
+         * (there are no signatures to verify).
+         *
+         * This is important for tests like "0 0 0 CHECKMULTISIG" which
+         * is a 0-of-0 multisig and should succeed.
          */
-        echo_bool_t result = ECHO_FALSE;
+        echo_bool_t result = (n_sigs == 0) ? ECHO_TRUE : ECHO_FALSE;
 
         /* Check NULLFAIL: all signatures must be empty if verification fails */
         if (ctx->flags & SCRIPT_VERIFY_NULLFAIL) {

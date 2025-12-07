@@ -10,6 +10,7 @@ TARGET  = echo
 SRCS    = src/main.c \
           src/platform/posix.c \
           src/crypto/sha256.c \
+          src/crypto/sha1.c \
           src/crypto/ripemd160.c \
           src/crypto/secp256k1.c \
           src/consensus/serialize.c \
@@ -36,6 +37,8 @@ TEST_SCRIPT          = test/unit/test_script
 TEST_STACK           = test/unit/test_stack
 TEST_OPCODES         = test/unit/test_opcodes
 TEST_P2SH            = test/unit/test_p2sh
+TEST_TIMELOCK        = test/unit/test_timelock
+TEST_SCRIPT_VECTORS  = test/unit/test_script_vectors
 
 .PHONY: all clean test
 
@@ -81,19 +84,25 @@ $(TEST_BLOCK): test/unit/test_block.c src/consensus/block.c src/consensus/tx.c s
 $(TEST_MERKLE): test/unit/test_merkle.c src/consensus/merkle.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_SCRIPT): test/unit/test_script.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/ripemd160.c src/crypto/secp256k1.c
+$(TEST_SCRIPT): test/unit/test_script.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_STACK): test/unit/test_stack.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/ripemd160.c src/crypto/secp256k1.c
+$(TEST_STACK): test/unit/test_stack.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_OPCODES): test/unit/test_opcodes.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/ripemd160.c src/crypto/secp256k1.c
+$(TEST_OPCODES): test/unit/test_opcodes.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_P2SH): test/unit/test_p2sh.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/ripemd160.c src/crypto/secp256k1.c
+$(TEST_P2SH): test/unit/test_p2sh.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY) $(TEST_SERIALIZE) $(TEST_TX) $(TEST_BLOCK) $(TEST_MERKLE) $(TEST_SCRIPT) $(TEST_STACK) $(TEST_OPCODES) $(TEST_P2SH)
+$(TEST_TIMELOCK): test/unit/test_timelock.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(TEST_SCRIPT_VECTORS): test/unit/test_script_vectors.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/consensus/merkle.c src/consensus/block.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY) $(TEST_SERIALIZE) $(TEST_TX) $(TEST_BLOCK) $(TEST_MERKLE) $(TEST_SCRIPT) $(TEST_STACK) $(TEST_OPCODES) $(TEST_P2SH) $(TEST_TIMELOCK)
 	@echo "Running SHA-256 tests..."
 	@./$(TEST_SHA256)
 	@echo ""
@@ -138,7 +147,10 @@ test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GRO
 	@echo ""
 	@echo "Running P2SH tests..."
 	@./$(TEST_P2SH)
+	@echo ""
+	@echo "Running Timelock tests..."
+	@./$(TEST_TIMELOCK)
 
 clean:
-	rm -f $(TARGET) $(OBJS) $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY) $(TEST_SERIALIZE) $(TEST_TX) $(TEST_BLOCK) $(TEST_MERKLE) $(TEST_SCRIPT) $(TEST_STACK) $(TEST_OPCODES) $(TEST_P2SH)
+	rm -f $(TARGET) $(OBJS) $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY) $(TEST_SERIALIZE) $(TEST_TX) $(TEST_BLOCK) $(TEST_MERKLE) $(TEST_SCRIPT) $(TEST_STACK) $(TEST_OPCODES) $(TEST_P2SH) $(TEST_TIMELOCK) $(TEST_SCRIPT_VECTORS)
 	find src -name '*.o' -delete
