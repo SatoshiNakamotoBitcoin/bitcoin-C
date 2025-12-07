@@ -54,6 +54,37 @@ typedef struct tx_s tx_t;
 #define SIGHASH_SINGLE_ANYONECANPAY (SIGHASH_SINGLE | SIGHASH_ANYONECANPAY)
 
 /*
+ * Taproot sighash type (BIP-341).
+ */
+#define SIGHASH_DEFAULT  0x00  /* Taproot default = SIGHASH_ALL semantics */
+
+/*
+ * ============================================================================
+ * TAPROOT CONSTANTS (BIP-341/342)
+ * ============================================================================
+ */
+
+/*
+ * Taproot leaf versions.
+ * The leaf version is encoded in the control block with the parity bit.
+ */
+#define TAPROOT_LEAF_VERSION_TAPSCRIPT  0xC0  /* BIP-342 Tapscript (v0) */
+
+/*
+ * Taproot control block limits.
+ */
+#define TAPROOT_CONTROL_BASE_SIZE    33   /* leaf_version (1) + internal_key (32) */
+#define TAPROOT_CONTROL_NODE_SIZE    32   /* Each Merkle node is 32 bytes */
+#define TAPROOT_CONTROL_MAX_NODE_COUNT 128  /* Max Merkle tree depth */
+#define TAPROOT_CONTROL_MAX_SIZE     (TAPROOT_CONTROL_BASE_SIZE + TAPROOT_CONTROL_NODE_SIZE * TAPROOT_CONTROL_MAX_NODE_COUNT)
+
+/*
+ * Tapscript limits (more restrictive than legacy).
+ */
+#define TAPSCRIPT_MAX_STACK_ELEMENT_SIZE 520  /* Same as legacy */
+#define TAPSCRIPT_VALIDATION_WEIGHT 50  /* Weight units per sigop */
+
+/*
  * Script size limits (consensus).
  */
 #define SCRIPT_MAX_SIZE           10000   /* Max script size in bytes */
@@ -548,6 +579,23 @@ typedef struct {
     uint8_t         hash_prevouts[32];
     uint8_t         hash_sequence[32];
     uint8_t         hash_outputs[32];
+
+    /*
+     * Taproot execution context (BIP-341/342).
+     * These fields are set during Taproot script path spending.
+     */
+    echo_bool_t     is_tapscript;      /* True if executing Tapscript */
+    uint8_t         tapleaf_hash[32];  /* Leaf hash for script path spending */
+    uint8_t         tap_internal_key[32]; /* Internal key (x-only) */
+    uint8_t         key_version;       /* Key version (0 for BIP-342) */
+
+    /*
+     * Taproot sighash cache (BIP-341).
+     * These are precomputed once per transaction for efficiency.
+     */
+    echo_bool_t     tap_sighash_cached;   /* True if Taproot cache is valid */
+    uint8_t         hash_amounts[32];     /* SHA256 of all input amounts */
+    uint8_t         hash_scriptpubkeys[32]; /* SHA256 of all scriptPubKeys */
 } script_context_t;
 
 
@@ -1428,5 +1476,183 @@ echo_result_t script_verify_p2wsh(script_context_t *ctx,
                                    const uint8_t *witness_data,
                                    size_t witness_len,
                                    const uint8_t script_hash[32]);
+
+
+/*
+ * ============================================================================
+ * TAPROOT SCRIPT EXECUTION (Session 4.6 — BIP-341/342)
+ * ============================================================================
+ */
+
+/*
+ * Compute BIP-341 signature hash for Taproot.
+ *
+ * This implements the Taproot-specific signature hash algorithm.
+ * Unlike BIP-143, it uses tagged hashes and commits to additional data.
+ *
+ * Parameters:
+ *   ctx           - Script context with transaction set
+ *   sighash_type  - Sighash type (0x00 for default, or standard types)
+ *   ext_flag      - Extension flag (0 for key path, 1 for script path)
+ *   sighash       - Output: 32-byte signature hash
+ *
+ * For script path spending (ext_flag=1), the tapleaf_hash and codesep_pos
+ * fields in ctx must be set.
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_NULL_PARAM if parameters are invalid
+ */
+echo_result_t sighash_taproot(script_context_t *ctx,
+                               uint32_t sighash_type,
+                               uint8_t ext_flag,
+                               uint8_t sighash[32]);
+
+/*
+ * Verify a Taproot key path spend.
+ *
+ * Key path spending is the simplest Taproot spending path:
+ * just verify a Schnorr signature against the output key.
+ *
+ * The witness contains: [signature]
+ * Where signature is 64 bytes (or 65 bytes with sighash type appended).
+ *
+ * Parameters:
+ *   ctx         - Script context with transaction set
+ *   witness_data - Serialized witness stack
+ *   witness_len  - Length of witness data
+ *   output_key   - 32-byte x-only output key from scriptPubKey
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_SCRIPT_* on verification failure
+ */
+echo_result_t script_verify_taproot_keypath(script_context_t *ctx,
+                                             const uint8_t *witness_data,
+                                             size_t witness_len,
+                                             const uint8_t output_key[32]);
+
+/*
+ * Parse a Taproot control block.
+ *
+ * The control block contains:
+ *   - 1 byte: leaf_version | output_key_parity
+ *   - 32 bytes: internal key (x-only)
+ *   - 0+ * 32 bytes: Merkle proof nodes
+ *
+ * Parameters:
+ *   control      - Control block data
+ *   control_len  - Length of control block
+ *   leaf_version - Output: leaf version (upper 7 bits)
+ *   parity       - Output: output key parity (bit 0)
+ *   internal_key - Output: 32-byte internal key
+ *   merkle_path  - Output: pointer to start of Merkle path
+ *   path_len     - Output: number of nodes in path
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_INVALID_FORMAT if control block is malformed
+ */
+echo_result_t taproot_parse_control_block(const uint8_t *control,
+                                           size_t control_len,
+                                           uint8_t *leaf_version,
+                                           uint8_t *parity,
+                                           uint8_t internal_key[32],
+                                           const uint8_t **merkle_path,
+                                           size_t *path_len);
+
+/*
+ * Compute the Taproot leaf hash.
+ *
+ * leaf_hash = tagged_hash("TapLeaf", leaf_version || compact_size(script_len) || script)
+ *
+ * Parameters:
+ *   leaf_version - Leaf version byte
+ *   script       - Script data
+ *   script_len   - Script length
+ *   leaf_hash    - Output: 32-byte leaf hash
+ *
+ * Returns:
+ *   ECHO_OK on success
+ */
+echo_result_t taproot_leaf_hash(uint8_t leaf_version,
+                                 const uint8_t *script,
+                                 size_t script_len,
+                                 uint8_t leaf_hash[32]);
+
+/*
+ * Verify the Taproot Merkle proof.
+ *
+ * Computes the Merkle root from the leaf hash and proof path,
+ * then verifies that tweaking the internal key produces the output key.
+ *
+ * Parameters:
+ *   leaf_hash     - 32-byte leaf hash
+ *   merkle_path   - Array of 32-byte nodes
+ *   path_len      - Number of nodes in path
+ *   internal_key  - 32-byte internal key
+ *   output_key    - 32-byte expected output key
+ *   parity        - Expected output key parity
+ *
+ * Returns:
+ *   ECHO_OK if proof is valid
+ *   ECHO_ERR_SCRIPT_ERROR if proof is invalid
+ */
+echo_result_t taproot_verify_merkle_proof(const uint8_t leaf_hash[32],
+                                           const uint8_t *merkle_path,
+                                           size_t path_len,
+                                           const uint8_t internal_key[32],
+                                           const uint8_t output_key[32],
+                                           uint8_t parity);
+
+/*
+ * Verify a Taproot script path spend.
+ *
+ * Script path spending uses:
+ * Witness: [stack items...] [script] [control block]
+ *
+ * Validation:
+ * 1. Parse control block to get internal key and Merkle proof
+ * 2. Compute leaf hash from script and leaf version
+ * 3. Verify Merkle proof against output key
+ * 4. Execute script (Tapscript rules if v0xC0)
+ *
+ * Parameters:
+ *   ctx          - Script context with transaction set
+ *   witness_data - Serialized witness stack
+ *   witness_len  - Length of witness data
+ *   output_key   - 32-byte x-only output key from scriptPubKey
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_SCRIPT_* on verification failure
+ */
+echo_result_t script_verify_taproot_scriptpath(script_context_t *ctx,
+                                                const uint8_t *witness_data,
+                                                size_t witness_len,
+                                                const uint8_t output_key[32]);
+
+/*
+ * Execute a Tapscript (BIP-342).
+ *
+ * Tapscript execution differs from legacy script:
+ * - OP_CHECKMULTISIG and OP_CHECKMULTISIGVERIFY are disabled
+ * - OP_CHECKSIGADD is enabled
+ * - Success opcodes (OP_SUCCESSx) cause immediate success
+ * - Signature validation uses BIP-340 Schnorr
+ * - MINIMALIF is always enforced
+ *
+ * Parameters:
+ *   ctx    - Script context (must have is_tapscript=true, tapleaf_hash set)
+ *   script - Script to execute
+ *   len    - Script length
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_SCRIPT_* on failure
+ */
+echo_result_t script_execute_tapscript(script_context_t *ctx,
+                                        const uint8_t *script,
+                                        size_t len);
 
 #endif /* ECHO_SCRIPT_H */
