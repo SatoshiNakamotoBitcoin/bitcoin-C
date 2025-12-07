@@ -12,6 +12,8 @@
 #include "sha256.h"
 #include "ripemd160.h"
 #include "sig_verify.h"
+#include "tx.h"
+#include "serialize.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -1329,6 +1331,20 @@ echo_result_t script_context_init(script_context_t *ctx, uint32_t flags)
     ctx->exec_depth = 0;
     ctx->skip_depth = 0;
 
+    /* Initialize transaction context (no tx by default) */
+    ctx->tx = NULL;
+    ctx->input_index = 0;
+    ctx->amount = 0;
+    ctx->script_code = NULL;
+    ctx->script_code_len = 0;
+    ctx->codesep_pos = 0;
+
+    /* Initialize sighash cache */
+    ctx->sighash_cached = ECHO_FALSE;
+    memset(ctx->hash_prevouts, 0, 32);
+    memset(ctx->hash_sequence, 0, 32);
+    memset(ctx->hash_outputs, 0, 32);
+
     return ECHO_OK;
 }
 
@@ -2618,6 +2634,760 @@ echo_result_t script_execute(script_context_t *ctx,
     /* Check for unbalanced conditionals */
     if (ctx->exec_depth != 0 || ctx->skip_depth != 0) {
         ctx->error = SCRIPT_ERR_UNBALANCED_CONDITIONAL;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    return ECHO_OK;
+}
+
+
+/*
+ * ============================================================================
+ * TRANSACTION CONTEXT AND SIGHASH (Session 4.5)
+ * ============================================================================
+ */
+
+/*
+ * Set transaction context for signature verification.
+ */
+void script_set_tx_context(script_context_t *ctx,
+                            const tx_t *tx,
+                            size_t input_index,
+                            satoshi_t amount,
+                            const uint8_t *script_code,
+                            size_t script_code_len)
+{
+    if (ctx == NULL) return;
+
+    ctx->tx = tx;
+    ctx->input_index = input_index;
+    ctx->amount = amount;
+    ctx->script_code = script_code;
+    ctx->script_code_len = script_code_len;
+    ctx->codesep_pos = 0;
+
+    /* Invalidate sighash cache when context changes */
+    ctx->sighash_cached = ECHO_FALSE;
+}
+
+/*
+ * Helper: Write a 32-bit little-endian value to a buffer.
+ */
+static void write_le32(uint8_t *buf, uint32_t val)
+{
+    buf[0] = (uint8_t)(val & 0xff);
+    buf[1] = (uint8_t)((val >> 8) & 0xff);
+    buf[2] = (uint8_t)((val >> 16) & 0xff);
+    buf[3] = (uint8_t)((val >> 24) & 0xff);
+}
+
+/*
+ * Helper: Write a 64-bit little-endian value to a buffer.
+ */
+static void write_le64(uint8_t *buf, uint64_t val)
+{
+    buf[0] = (uint8_t)(val & 0xff);
+    buf[1] = (uint8_t)((val >> 8) & 0xff);
+    buf[2] = (uint8_t)((val >> 16) & 0xff);
+    buf[3] = (uint8_t)((val >> 24) & 0xff);
+    buf[4] = (uint8_t)((val >> 32) & 0xff);
+    buf[5] = (uint8_t)((val >> 40) & 0xff);
+    buf[6] = (uint8_t)((val >> 48) & 0xff);
+    buf[7] = (uint8_t)((val >> 56) & 0xff);
+}
+
+/*
+ * Helper: Compute hash of all prevouts (for BIP-143).
+ */
+static void compute_hash_prevouts(const tx_t *tx, uint8_t out[32])
+{
+    sha256_ctx_t sha;
+    sha256_init(&sha);
+
+    for (size_t i = 0; i < tx->input_count; i++) {
+        /* Each prevout is 32-byte txid + 4-byte vout */
+        sha256_update(&sha, tx->inputs[i].prevout.txid.bytes, 32);
+        uint8_t vout_buf[4];
+        write_le32(vout_buf, tx->inputs[i].prevout.vout);
+        sha256_update(&sha, vout_buf, 4);
+    }
+
+    uint8_t single_hash[32];
+    sha256_final(&sha, single_hash);
+    sha256d(single_hash, 32, out);  /* Double SHA256 */
+}
+
+/*
+ * Helper: Compute hash of all sequence numbers (for BIP-143).
+ */
+static void compute_hash_sequence(const tx_t *tx, uint8_t out[32])
+{
+    sha256_ctx_t sha;
+    sha256_init(&sha);
+
+    for (size_t i = 0; i < tx->input_count; i++) {
+        uint8_t seq_buf[4];
+        write_le32(seq_buf, tx->inputs[i].sequence);
+        sha256_update(&sha, seq_buf, 4);
+    }
+
+    uint8_t single_hash[32];
+    sha256_final(&sha, single_hash);
+    sha256d(single_hash, 32, out);
+}
+
+/*
+ * Helper: Compute hash of all outputs (for BIP-143).
+ */
+static void compute_hash_outputs(const tx_t *tx, uint8_t out[32])
+{
+    sha256_ctx_t sha;
+    sha256_init(&sha);
+
+    for (size_t i = 0; i < tx->output_count; i++) {
+        /* Each output is 8-byte value + varint script length + script */
+        uint8_t val_buf[8];
+        write_le64(val_buf, (uint64_t)tx->outputs[i].value);
+        sha256_update(&sha, val_buf, 8);
+
+        /* Write script length as varint */
+        uint8_t varint_buf[9];
+        size_t varint_len = 0;
+        size_t script_len = tx->outputs[i].script_pubkey_len;
+        if (script_len < 0xfd) {
+            varint_buf[0] = (uint8_t)script_len;
+            varint_len = 1;
+        } else if (script_len <= 0xffff) {
+            varint_buf[0] = 0xfd;
+            varint_buf[1] = (uint8_t)(script_len & 0xff);
+            varint_buf[2] = (uint8_t)((script_len >> 8) & 0xff);
+            varint_len = 3;
+        } else {
+            varint_buf[0] = 0xfe;
+            write_le32(varint_buf + 1, (uint32_t)script_len);
+            varint_len = 5;
+        }
+        sha256_update(&sha, varint_buf, varint_len);
+        sha256_update(&sha, tx->outputs[i].script_pubkey, script_len);
+    }
+
+    uint8_t single_hash[32];
+    sha256_final(&sha, single_hash);
+    sha256d(single_hash, 32, out);
+}
+
+/*
+ * Helper: Compute hash of a single output (for SIGHASH_SINGLE).
+ */
+static void compute_hash_single_output(const tx_t *tx, size_t index, uint8_t out[32])
+{
+    if (index >= tx->output_count) {
+        /* SIGHASH_SINGLE with no matching output: hash is all zeros */
+        memset(out, 0, 32);
+        return;
+    }
+
+    sha256_ctx_t sha;
+    sha256_init(&sha);
+
+    uint8_t val_buf[8];
+    write_le64(val_buf, (uint64_t)tx->outputs[index].value);
+    sha256_update(&sha, val_buf, 8);
+
+    uint8_t varint_buf[9];
+    size_t varint_len = 0;
+    size_t script_len = tx->outputs[index].script_pubkey_len;
+    if (script_len < 0xfd) {
+        varint_buf[0] = (uint8_t)script_len;
+        varint_len = 1;
+    } else if (script_len <= 0xffff) {
+        varint_buf[0] = 0xfd;
+        varint_buf[1] = (uint8_t)(script_len & 0xff);
+        varint_buf[2] = (uint8_t)((script_len >> 8) & 0xff);
+        varint_len = 3;
+    } else {
+        varint_buf[0] = 0xfe;
+        write_le32(varint_buf + 1, (uint32_t)script_len);
+        varint_len = 5;
+    }
+    sha256_update(&sha, varint_buf, varint_len);
+    sha256_update(&sha, tx->outputs[index].script_pubkey, script_len);
+
+    uint8_t single_hash[32];
+    sha256_final(&sha, single_hash);
+    sha256d(single_hash, 32, out);
+}
+
+/*
+ * Compute BIP-143 signature hash for SegWit v0.
+ *
+ * BIP-143 sighash serialization:
+ *   1. nVersion (4 bytes)
+ *   2. hashPrevouts (32 bytes)
+ *   3. hashSequence (32 bytes)
+ *   4. outpoint (36 bytes: 32-byte txid + 4-byte vout)
+ *   5. scriptCode (varint + data)
+ *   6. amount (8 bytes)
+ *   7. nSequence (4 bytes)
+ *   8. hashOutputs (32 bytes)
+ *   9. nLockTime (4 bytes)
+ *  10. nHashType (4 bytes)
+ */
+echo_result_t sighash_bip143(script_context_t *ctx,
+                              uint32_t sighash_type,
+                              uint8_t sighash[32])
+{
+    if (ctx == NULL || ctx->tx == NULL || sighash == NULL) {
+        return ECHO_ERR_NULL_PARAM;
+    }
+
+    const tx_t *tx = ctx->tx;
+    size_t idx = ctx->input_index;
+
+    if (idx >= tx->input_count) {
+        return ECHO_ERR_OUT_OF_RANGE;
+    }
+
+    uint32_t base_type = sighash_type & 0x1f;
+    echo_bool_t anyone_can_pay = (sighash_type & SIGHASH_ANYONECANPAY) != 0;
+
+    /* Compute cached hashes if not already done */
+    if (!ctx->sighash_cached) {
+        compute_hash_prevouts(tx, ctx->hash_prevouts);
+        compute_hash_sequence(tx, ctx->hash_sequence);
+        compute_hash_outputs(tx, ctx->hash_outputs);
+        ctx->sighash_cached = ECHO_TRUE;
+    }
+
+    sha256_ctx_t sha;
+    sha256_init(&sha);
+
+    /* 1. nVersion */
+    uint8_t version_buf[4];
+    write_le32(version_buf, (uint32_t)tx->version);
+    sha256_update(&sha, version_buf, 4);
+
+    /* 2. hashPrevouts */
+    if (anyone_can_pay) {
+        uint8_t zeros[32] = {0};
+        sha256_update(&sha, zeros, 32);
+    } else {
+        sha256_update(&sha, ctx->hash_prevouts, 32);
+    }
+
+    /* 3. hashSequence */
+    if (anyone_can_pay || base_type == SIGHASH_SINGLE || base_type == SIGHASH_NONE) {
+        uint8_t zeros[32] = {0};
+        sha256_update(&sha, zeros, 32);
+    } else {
+        sha256_update(&sha, ctx->hash_sequence, 32);
+    }
+
+    /* 4. outpoint (txid + vout) */
+    sha256_update(&sha, tx->inputs[idx].prevout.txid.bytes, 32);
+    uint8_t vout_buf[4];
+    write_le32(vout_buf, tx->inputs[idx].prevout.vout);
+    sha256_update(&sha, vout_buf, 4);
+
+    /* 5. scriptCode (with length prefix) */
+    const uint8_t *script_code = ctx->script_code;
+    size_t script_code_len = ctx->script_code_len;
+
+    /* Handle CODESEPARATOR: use script from codesep_pos onwards */
+    if (ctx->codesep_pos > 0 && ctx->codesep_pos < script_code_len) {
+        script_code = script_code + ctx->codesep_pos;
+        script_code_len = script_code_len - ctx->codesep_pos;
+    }
+
+    uint8_t varint_buf[9];
+    size_t varint_len = 0;
+    if (script_code_len < 0xfd) {
+        varint_buf[0] = (uint8_t)script_code_len;
+        varint_len = 1;
+    } else if (script_code_len <= 0xffff) {
+        varint_buf[0] = 0xfd;
+        varint_buf[1] = (uint8_t)(script_code_len & 0xff);
+        varint_buf[2] = (uint8_t)((script_code_len >> 8) & 0xff);
+        varint_len = 3;
+    } else {
+        varint_buf[0] = 0xfe;
+        write_le32(varint_buf + 1, (uint32_t)script_code_len);
+        varint_len = 5;
+    }
+    sha256_update(&sha, varint_buf, varint_len);
+    if (script_code_len > 0) {
+        sha256_update(&sha, script_code, script_code_len);
+    }
+
+    /* 6. amount (8 bytes) */
+    uint8_t amount_buf[8];
+    write_le64(amount_buf, (uint64_t)ctx->amount);
+    sha256_update(&sha, amount_buf, 8);
+
+    /* 7. nSequence */
+    uint8_t seq_buf[4];
+    write_le32(seq_buf, tx->inputs[idx].sequence);
+    sha256_update(&sha, seq_buf, 4);
+
+    /* 8. hashOutputs */
+    if (base_type == SIGHASH_NONE) {
+        uint8_t zeros[32] = {0};
+        sha256_update(&sha, zeros, 32);
+    } else if (base_type == SIGHASH_SINGLE) {
+        uint8_t single_out_hash[32];
+        compute_hash_single_output(tx, idx, single_out_hash);
+        sha256_update(&sha, single_out_hash, 32);
+    } else {
+        sha256_update(&sha, ctx->hash_outputs, 32);
+    }
+
+    /* 9. nLockTime */
+    uint8_t locktime_buf[4];
+    write_le32(locktime_buf, tx->locktime);
+    sha256_update(&sha, locktime_buf, 4);
+
+    /* 10. nHashType */
+    uint8_t hashtype_buf[4];
+    write_le32(hashtype_buf, sighash_type);
+    sha256_update(&sha, hashtype_buf, 4);
+
+    /* Finalize with double SHA-256 */
+    uint8_t single_hash[32];
+    sha256_final(&sha, single_hash);
+    sha256(single_hash, 32, sighash);
+
+    return ECHO_OK;
+}
+
+/*
+ * Compute legacy signature hash (pre-SegWit).
+ * This is a simplified implementation for basic SIGHASH_ALL.
+ */
+echo_result_t sighash_legacy(script_context_t *ctx,
+                              uint32_t sighash_type,
+                              uint8_t sighash[32])
+{
+    if (ctx == NULL || ctx->tx == NULL || sighash == NULL) {
+        return ECHO_ERR_NULL_PARAM;
+    }
+
+    /*
+     * Legacy sighash requires serializing a modified transaction.
+     * This is complex because we need to:
+     * 1. Clear all input scripts except the one being signed
+     * 2. Replace that script with scriptCode
+     * 3. Handle SIGHASH_SINGLE and SIGHASH_NONE edge cases
+     *
+     * For now, we implement basic SIGHASH_ALL support.
+     * Full legacy sighash is complex and rarely needed for new code.
+     */
+
+    /* Calculate approximate buffer size needed */
+    const tx_t *tx = ctx->tx;
+    size_t buf_size = 4; /* version */
+
+    /* Input count varint */
+    buf_size += 9;
+
+    /* Inputs */
+    for (size_t i = 0; i < tx->input_count; i++) {
+        buf_size += 32 + 4; /* outpoint */
+        if (i == ctx->input_index) {
+            buf_size += 9 + ctx->script_code_len; /* scriptCode */
+        } else {
+            buf_size += 1; /* empty script */
+        }
+        buf_size += 4; /* sequence */
+    }
+
+    /* Output count varint */
+    buf_size += 9;
+
+    /* Outputs */
+    for (size_t i = 0; i < tx->output_count; i++) {
+        buf_size += 8; /* value */
+        buf_size += 9 + tx->outputs[i].script_pubkey_len; /* script */
+    }
+
+    buf_size += 4; /* locktime */
+    buf_size += 4; /* sighash type */
+
+    /* Allocate buffer */
+    uint8_t *buf = (uint8_t *)malloc(buf_size);
+    if (buf == NULL) {
+        return ECHO_ERR_OUT_OF_MEMORY;
+    }
+
+    size_t pos = 0;
+
+    /* Version */
+    write_le32(buf + pos, (uint32_t)tx->version);
+    pos += 4;
+
+    /* Input count */
+    if (tx->input_count < 0xfd) {
+        buf[pos++] = (uint8_t)tx->input_count;
+    } else {
+        buf[pos++] = 0xfd;
+        buf[pos++] = (uint8_t)(tx->input_count & 0xff);
+        buf[pos++] = (uint8_t)((tx->input_count >> 8) & 0xff);
+    }
+
+    /* Inputs */
+    for (size_t i = 0; i < tx->input_count; i++) {
+        /* Outpoint */
+        memcpy(buf + pos, tx->inputs[i].prevout.txid.bytes, 32);
+        pos += 32;
+        write_le32(buf + pos, tx->inputs[i].prevout.vout);
+        pos += 4;
+
+        /* Script */
+        if (i == ctx->input_index) {
+            /* Use scriptCode for the input being signed */
+            size_t len = ctx->script_code_len;
+            if (len < 0xfd) {
+                buf[pos++] = (uint8_t)len;
+            } else {
+                buf[pos++] = 0xfd;
+                buf[pos++] = (uint8_t)(len & 0xff);
+                buf[pos++] = (uint8_t)((len >> 8) & 0xff);
+            }
+            if (len > 0) {
+                memcpy(buf + pos, ctx->script_code, len);
+                pos += len;
+            }
+        } else {
+            /* Empty script for other inputs */
+            buf[pos++] = 0;
+        }
+
+        /* Sequence */
+        write_le32(buf + pos, tx->inputs[i].sequence);
+        pos += 4;
+    }
+
+    /* Output count */
+    if (tx->output_count < 0xfd) {
+        buf[pos++] = (uint8_t)tx->output_count;
+    } else {
+        buf[pos++] = 0xfd;
+        buf[pos++] = (uint8_t)(tx->output_count & 0xff);
+        buf[pos++] = (uint8_t)((tx->output_count >> 8) & 0xff);
+    }
+
+    /* Outputs */
+    for (size_t i = 0; i < tx->output_count; i++) {
+        /* Value */
+        write_le64(buf + pos, (uint64_t)tx->outputs[i].value);
+        pos += 8;
+
+        /* Script */
+        size_t len = tx->outputs[i].script_pubkey_len;
+        if (len < 0xfd) {
+            buf[pos++] = (uint8_t)len;
+        } else {
+            buf[pos++] = 0xfd;
+            buf[pos++] = (uint8_t)(len & 0xff);
+            buf[pos++] = (uint8_t)((len >> 8) & 0xff);
+        }
+        memcpy(buf + pos, tx->outputs[i].script_pubkey, len);
+        pos += len;
+    }
+
+    /* Locktime */
+    write_le32(buf + pos, tx->locktime);
+    pos += 4;
+
+    /* Sighash type */
+    write_le32(buf + pos, sighash_type);
+    pos += 4;
+
+    /* Double SHA256 */
+    sha256d(buf, pos, sighash);
+
+    free(buf);
+    return ECHO_OK;
+}
+
+/*
+ * Verify a P2WPKH (Pay to Witness Public Key Hash) script.
+ */
+echo_result_t script_verify_p2wpkh(script_context_t *ctx,
+                                    const uint8_t *witness_data,
+                                    size_t witness_len,
+                                    const uint8_t pubkey_hash[20])
+{
+    if (ctx == NULL || witness_data == NULL || pubkey_hash == NULL) {
+        return ECHO_ERR_NULL_PARAM;
+    }
+
+    /*
+     * P2WPKH witness stack: [signature, pubkey]
+     * We need to:
+     * 1. Parse the witness stack (2 items)
+     * 2. Check that HASH160(pubkey) == pubkey_hash
+     * 3. Compute BIP-143 sighash with P2PKH-style scriptCode
+     * 4. Verify signature against sighash and pubkey
+     */
+
+    /* Parse witness stack - format: count + [len + data]... */
+    if (witness_len < 1) {
+        ctx->error = SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    size_t pos = 0;
+    size_t count = witness_data[pos++];
+
+    if (count != 2) {
+        ctx->error = SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /* Read signature */
+    if (pos >= witness_len) {
+        ctx->error = SCRIPT_ERR_WITNESS_MALLEATED;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+    size_t sig_len = witness_data[pos++];
+    if (pos + sig_len > witness_len) {
+        ctx->error = SCRIPT_ERR_WITNESS_MALLEATED;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+    const uint8_t *sig = witness_data + pos;
+    pos += sig_len;
+
+    /* Read pubkey */
+    if (pos >= witness_len) {
+        ctx->error = SCRIPT_ERR_WITNESS_MALLEATED;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+    size_t pubkey_len = witness_data[pos++];
+    if (pos + pubkey_len > witness_len) {
+        ctx->error = SCRIPT_ERR_WITNESS_MALLEATED;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+    const uint8_t *pubkey = witness_data + pos;
+
+    /* Verify pubkey hash matches */
+    uint8_t computed_hash[20];
+    hash160(pubkey, pubkey_len, computed_hash);
+    if (memcmp(computed_hash, pubkey_hash, 20) != 0) {
+        ctx->error = SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /* Verify pubkey is compressed (33 bytes, starts with 02 or 03) */
+    if ((ctx->flags & SCRIPT_VERIFY_WITNESS_PUBKEYTYPE) && pubkey_len != 33) {
+        ctx->error = SCRIPT_ERR_WITNESS_PUBKEYTYPE;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /* Empty signature with NULLFAIL check */
+    if (sig_len == 0) {
+        if (ctx->flags & SCRIPT_VERIFY_NULLFAIL) {
+            /* Empty sig is OK in NULLFAIL mode - it just fails verification */
+        }
+        ctx->error = SCRIPT_ERR_EVAL_FALSE;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /* Extract sighash type from last byte of signature */
+    uint32_t sighash_type = sig[sig_len - 1];
+    size_t actual_sig_len = sig_len - 1;
+
+    /* Build P2PKH-style scriptCode for sighash:
+     * OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG
+     */
+    uint8_t script_code[25];
+    script_code[0] = OP_DUP;
+    script_code[1] = OP_HASH160;
+    script_code[2] = 0x14;  /* Push 20 bytes */
+    memcpy(script_code + 3, pubkey_hash, 20);
+    script_code[23] = OP_EQUALVERIFY;
+    script_code[24] = OP_CHECKSIG;
+
+    /* Set script code for sighash computation */
+    const uint8_t *old_script_code = ctx->script_code;
+    size_t old_script_code_len = ctx->script_code_len;
+    ctx->script_code = script_code;
+    ctx->script_code_len = 25;
+
+    /* Compute BIP-143 sighash */
+    uint8_t sighash_out[32];
+    echo_result_t res = sighash_bip143(ctx, sighash_type, sighash_out);
+
+    /* Restore script code */
+    ctx->script_code = old_script_code;
+    ctx->script_code_len = old_script_code_len;
+
+    if (res != ECHO_OK) {
+        return res;
+    }
+
+    /* Verify signature using ECDSA */
+    int valid = sig_verify(SIG_ECDSA, sig, actual_sig_len, sighash_out, pubkey, pubkey_len);
+    if (!valid) {
+        if ((ctx->flags & SCRIPT_VERIFY_NULLFAIL) && sig_len > 0) {
+            ctx->error = SCRIPT_ERR_SIG_NULLFAIL;
+            return ECHO_ERR_SCRIPT_ERROR;
+        }
+        ctx->error = SCRIPT_ERR_EVAL_FALSE;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    return ECHO_OK;
+}
+
+/*
+ * Verify a P2WSH (Pay to Witness Script Hash) script.
+ */
+echo_result_t script_verify_p2wsh(script_context_t *ctx,
+                                   const uint8_t *witness_data,
+                                   size_t witness_len,
+                                   const uint8_t script_hash[32])
+{
+    if (ctx == NULL || witness_data == NULL || script_hash == NULL) {
+        return ECHO_ERR_NULL_PARAM;
+    }
+
+    /*
+     * P2WSH witness stack: [input1, input2, ..., witnessScript]
+     * The last element is the witness script.
+     */
+
+    if (witness_len < 1) {
+        ctx->error = SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    size_t pos = 0;
+    size_t count = witness_data[pos++];
+
+    if (count == 0) {
+        ctx->error = SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /* Parse all witness items to find the last one (witness script) */
+    const uint8_t *witness_script = NULL;
+    size_t witness_script_len = 0;
+
+    for (size_t i = 0; i < count; i++) {
+        if (pos >= witness_len) {
+            ctx->error = SCRIPT_ERR_WITNESS_MALLEATED;
+            return ECHO_ERR_SCRIPT_ERROR;
+        }
+
+        /* Read length (may be varint) */
+        size_t item_len = witness_data[pos++];
+        if (item_len == 0xfd) {
+            if (pos + 2 > witness_len) {
+                ctx->error = SCRIPT_ERR_WITNESS_MALLEATED;
+                return ECHO_ERR_SCRIPT_ERROR;
+            }
+            item_len = witness_data[pos] | ((size_t)witness_data[pos + 1] << 8);
+            pos += 2;
+        } else if (item_len == 0xfe) {
+            if (pos + 4 > witness_len) {
+                ctx->error = SCRIPT_ERR_WITNESS_MALLEATED;
+                return ECHO_ERR_SCRIPT_ERROR;
+            }
+            item_len = witness_data[pos] | ((size_t)witness_data[pos + 1] << 8) |
+                       ((size_t)witness_data[pos + 2] << 16) | ((size_t)witness_data[pos + 3] << 24);
+            pos += 4;
+        }
+
+        if (pos + item_len > witness_len) {
+            ctx->error = SCRIPT_ERR_WITNESS_MALLEATED;
+            return ECHO_ERR_SCRIPT_ERROR;
+        }
+
+        if (i == count - 1) {
+            /* Last item is the witness script */
+            witness_script = witness_data + pos;
+            witness_script_len = item_len;
+        }
+
+        pos += item_len;
+    }
+
+    if (witness_script == NULL) {
+        ctx->error = SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /* Verify script hash: SHA256(witness_script) == script_hash */
+    uint8_t computed_hash[32];
+    sha256(witness_script, witness_script_len, computed_hash);
+    if (memcmp(computed_hash, script_hash, 32) != 0) {
+        ctx->error = SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /* Check witness script size limit */
+    if (witness_script_len > SCRIPT_MAX_SIZE) {
+        ctx->error = SCRIPT_ERR_SCRIPT_SIZE;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /*
+     * Now we need to execute the witness script with the remaining
+     * witness items as the initial stack.
+     *
+     * Set up the context with the witness script as scriptCode
+     * for BIP-143 sighash computation.
+     */
+    ctx->script_code = witness_script;
+    ctx->script_code_len = witness_script_len;
+
+    /* Push witness items (except the last one) onto the stack */
+    pos = 1; /* Skip count byte */
+    for (size_t i = 0; i < count - 1; i++) {
+        size_t item_len = witness_data[pos++];
+        if (item_len == 0xfd) {
+            item_len = witness_data[pos] | ((size_t)witness_data[pos + 1] << 8);
+            pos += 2;
+        } else if (item_len == 0xfe) {
+            item_len = witness_data[pos] | ((size_t)witness_data[pos + 1] << 8) |
+                       ((size_t)witness_data[pos + 2] << 16) | ((size_t)witness_data[pos + 3] << 24);
+            pos += 4;
+        }
+
+        echo_result_t res = stack_push(&ctx->stack, witness_data + pos, item_len);
+        if (res != ECHO_OK) {
+            return res;
+        }
+        pos += item_len;
+    }
+
+    /* Execute the witness script */
+    echo_result_t res = script_execute(ctx, witness_script, witness_script_len);
+    if (res != ECHO_OK) {
+        return res;
+    }
+
+    /* Check final stack state */
+    if (stack_empty(&ctx->stack)) {
+        ctx->error = SCRIPT_ERR_EVAL_FALSE;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /* Top of stack must be true */
+    echo_bool_t result;
+    res = stack_pop_bool(&ctx->stack, &result);
+    if (res != ECHO_OK) {
+        return res;
+    }
+
+    if (!result) {
+        ctx->error = SCRIPT_ERR_EVAL_FALSE;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /* Clean stack check for witness */
+    if ((ctx->flags & SCRIPT_VERIFY_CLEANSTACK) && !stack_empty(&ctx->stack)) {
+        ctx->error = SCRIPT_ERR_CLEANSTACK;
         return ECHO_ERR_SCRIPT_ERROR;
     }
 

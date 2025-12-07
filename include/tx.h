@@ -106,8 +106,9 @@ typedef struct {
 
 /*
  * Complete transaction.
+ * Uses named struct for forward declaration compatibility.
  */
-typedef struct {
+typedef struct tx_s {
     int32_t      version;       /* Transaction version (signed per protocol) */
     tx_input_t  *inputs;        /* Array of inputs (owned) */
     size_t       input_count;

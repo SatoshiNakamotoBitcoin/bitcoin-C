@@ -21,6 +21,38 @@
 
 #include "echo_types.h"
 
+/* Forward declaration for transaction type */
+struct tx_s;
+typedef struct tx_s tx_t;
+
+/*
+ * ============================================================================
+ * SIGHASH TYPES (BIP-143)
+ * ============================================================================
+ *
+ * The sighash type determines which parts of the transaction are signed.
+ * This allows for various spending conditions and transaction construction.
+ */
+
+/*
+ * Base sighash types (lower 5 bits).
+ */
+#define SIGHASH_ALL          0x01  /* Sign all inputs and outputs */
+#define SIGHASH_NONE         0x02  /* Sign all inputs, no outputs */
+#define SIGHASH_SINGLE       0x03  /* Sign all inputs, only matching output */
+
+/*
+ * Sighash modifier (bit 7).
+ */
+#define SIGHASH_ANYONECANPAY 0x80  /* Only sign own input */
+
+/*
+ * Combined sighash types.
+ */
+#define SIGHASH_ALL_ANYONECANPAY    (SIGHASH_ALL | SIGHASH_ANYONECANPAY)
+#define SIGHASH_NONE_ANYONECANPAY   (SIGHASH_NONE | SIGHASH_ANYONECANPAY)
+#define SIGHASH_SINGLE_ANYONECANPAY (SIGHASH_SINGLE | SIGHASH_ANYONECANPAY)
+
 /*
  * Script size limits (consensus).
  */
@@ -466,6 +498,9 @@ typedef enum {
     SCRIPT_ERR_TAPSCRIPT_CHECKMULTISIG,
     SCRIPT_ERR_TAPSCRIPT_MINIMALIF,
 
+    /* Other evaluation errors */
+    SCRIPT_ERR_CLEANSTACK,
+
     /* Memory errors */
     SCRIPT_ERR_OUT_OF_MEMORY,
 
@@ -492,6 +527,27 @@ typedef struct {
      */
     int exec_depth;   /* Depth of executed branches */
     int skip_depth;   /* Depth of skipped branches (0 = executing) */
+
+    /*
+     * Transaction context for signature verification.
+     * These fields must be set for CHECKSIG/CHECKMULTISIG to work.
+     * If tx is NULL, signature verification always fails.
+     */
+    const tx_t     *tx;              /* Spending transaction */
+    size_t          input_index;     /* Index of input being verified */
+    satoshi_t       amount;          /* Value of the UTXO being spent */
+    const uint8_t  *script_code;     /* Script being signed (for sighash) */
+    size_t          script_code_len; /* Length of script_code */
+    size_t          codesep_pos;     /* Position after last OP_CODESEPARATOR */
+
+    /*
+     * Signature hash cache for BIP-143 (SegWit v0).
+     * These are precomputed once per transaction for efficiency.
+     */
+    echo_bool_t     sighash_cached;  /* True if cache is valid */
+    uint8_t         hash_prevouts[32];
+    uint8_t         hash_sequence[32];
+    uint8_t         hash_outputs[32];
 } script_context_t;
 
 
@@ -1266,5 +1322,111 @@ echo_result_t script_execute(script_context_t *ctx,
  *   ECHO_TRUE if executing, ECHO_FALSE if skipping
  */
 echo_bool_t script_is_executing(const script_context_t *ctx);
+
+
+/*
+ * ============================================================================
+ * TRANSACTION CONTEXT AND SIGHASH (Session 4.5)
+ * ============================================================================
+ */
+
+/*
+ * Set transaction context for signature verification.
+ *
+ * This must be called before executing scripts that contain CHECKSIG
+ * or CHECKMULTISIG opcodes for actual signature verification.
+ *
+ * Parameters:
+ *   ctx         - Script context
+ *   tx          - Spending transaction
+ *   input_index - Index of the input being verified
+ *   amount      - Value of the UTXO being spent (for BIP-143)
+ *   script_code - The script being signed
+ *   script_code_len - Length of script_code
+ */
+void script_set_tx_context(script_context_t *ctx,
+                            const tx_t *tx,
+                            size_t input_index,
+                            satoshi_t amount,
+                            const uint8_t *script_code,
+                            size_t script_code_len);
+
+/*
+ * Compute BIP-143 signature hash for SegWit v0.
+ *
+ * This implements the signature hash algorithm defined in BIP-143,
+ * which is used for P2WPKH, P2WSH, and P2SH-wrapped witness scripts.
+ *
+ * Parameters:
+ *   ctx           - Script context with transaction set
+ *   sighash_type  - Sighash type (SIGHASH_ALL, SIGHASH_NONE, etc.)
+ *   sighash       - Output: 32-byte signature hash
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_NULL_PARAM if parameters are invalid
+ */
+echo_result_t sighash_bip143(script_context_t *ctx,
+                              uint32_t sighash_type,
+                              uint8_t sighash[32]);
+
+/*
+ * Compute legacy signature hash (pre-SegWit).
+ *
+ * This implements the original Bitcoin signature hash algorithm.
+ *
+ * Parameters:
+ *   ctx           - Script context with transaction set
+ *   sighash_type  - Sighash type
+ *   sighash       - Output: 32-byte signature hash
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_NULL_PARAM if parameters are invalid
+ */
+echo_result_t sighash_legacy(script_context_t *ctx,
+                              uint32_t sighash_type,
+                              uint8_t sighash[32]);
+
+/*
+ * Verify a P2WPKH (Pay to Witness Public Key Hash) script.
+ *
+ * Witness: [signature, pubkey]
+ * Script: OP_0 <20-byte-hash>
+ *
+ * Parameters:
+ *   ctx        - Script context with transaction set
+ *   witness    - Witness stack (2 items: sig, pubkey)
+ *   pubkey_hash - 20-byte pubkey hash from scriptPubKey
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_SCRIPT_* on verification failure
+ */
+echo_result_t script_verify_p2wpkh(script_context_t *ctx,
+                                    const uint8_t *witness_data,
+                                    size_t witness_len,
+                                    const uint8_t pubkey_hash[20]);
+
+/*
+ * Verify a P2WSH (Pay to Witness Script Hash) script.
+ *
+ * Witness: [input1, input2, ..., witnessScript]
+ * Script: OP_0 <32-byte-hash>
+ *
+ * Parameters:
+ *   ctx          - Script context with transaction set
+ *   witness_data - Serialized witness stack
+ *   witness_len  - Length of witness data
+ *   script_hash  - 32-byte script hash from scriptPubKey
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_SCRIPT_* on verification failure
+ */
+echo_result_t script_verify_p2wsh(script_context_t *ctx,
+                                   const uint8_t *witness_data,
+                                   size_t witness_len,
+                                   const uint8_t script_hash[32]);
 
 #endif /* ECHO_SCRIPT_H */
