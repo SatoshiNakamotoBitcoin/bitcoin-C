@@ -8,8 +8,6 @@ A complete, ossified implementation of the Bitcoin protocol in pure C.
 
 **Phase 4: Script Interpreter** — Complete
 
-See the full [implementation roadmap](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/ROADMAP.md) for detailed progress.
-
 | Component | Status |
 |-----------|--------|
 | **Cryptography** | |
@@ -36,7 +34,7 @@ See the full [implementation roadmap](https://github.com/bitcoinecho/bitcoinecho
 | Script Execution | Complete |
 | UTXO Context | Complete |
 
-Next: Phase 5 — Block Validation
+Next: [Phase 5 — Block Validation](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/ROADMAP.md#phase-5-consensus-engine--block-validation-1)
 
 ## Building
 
