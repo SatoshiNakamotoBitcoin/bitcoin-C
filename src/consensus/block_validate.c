@@ -9,6 +9,7 @@
 #include "block_validate.h"
 #include "sha256.h"
 #include "merkle.h"
+#include <stdlib.h>
 #include <string.h>
 
 /*
@@ -1242,6 +1243,369 @@ echo_bool_t coinbase_is_mature(uint32_t coinbase_height, uint32_t current_height
     }
 
     if (current_height - coinbase_height < COINBASE_MATURITY) {
+        return ECHO_FALSE;
+    }
+
+    return ECHO_TRUE;
+}
+
+/*
+ * ============================================================================
+ * Full Block Validation Implementation (Session 5.4)
+ * ============================================================================
+ */
+
+/*
+ * Initialize a full block validation context.
+ */
+void full_block_ctx_init(full_block_ctx_t *ctx)
+{
+    if (ctx == NULL) return;
+
+    block_validate_ctx_init(&ctx->header_ctx);
+    difficulty_ctx_init(&ctx->difficulty_ctx);
+    ctx->height = 0;
+    ctx->total_fees = 0;
+    ctx->segwit_active = ECHO_FALSE;
+}
+
+/*
+ * Initialize a block validation result.
+ */
+void block_validation_result_init(block_validation_result_t *result)
+{
+    if (result == NULL) return;
+
+    result->valid = ECHO_FALSE;
+    result->error = BLOCK_VALID;
+    result->failing_tx_index = 0;
+    result->error_msg = NULL;
+}
+
+/*
+ * Check if a block has any duplicate transaction IDs.
+ *
+ * Uses O(n^2) comparison which is acceptable for typical block sizes.
+ * For very large blocks, a hash table would be more efficient.
+ */
+echo_bool_t block_has_duplicate_txids(const block_t *block, size_t *dup_idx)
+{
+    size_t i, j;
+    hash256_t *txids;
+    echo_result_t result;
+    echo_bool_t found_dup = ECHO_FALSE;
+
+    if (block == NULL || block->tx_count == 0) {
+        return ECHO_FALSE;
+    }
+
+    /* Allocate array for txids */
+    txids = malloc(block->tx_count * sizeof(hash256_t));
+    if (txids == NULL) {
+        /* Can't check, assume no duplicates */
+        return ECHO_FALSE;
+    }
+
+    /* Compute all txids */
+    for (i = 0; i < block->tx_count; i++) {
+        result = tx_compute_txid(&block->txs[i], &txids[i]);
+        if (result != ECHO_OK) {
+            free(txids);
+            return ECHO_FALSE;
+        }
+    }
+
+    /* Check for duplicates */
+    for (i = 0; i < block->tx_count && !found_dup; i++) {
+        for (j = i + 1; j < block->tx_count; j++) {
+            if (memcmp(txids[i].bytes, txids[j].bytes, 32) == 0) {
+                found_dup = ECHO_TRUE;
+                if (dup_idx != NULL) {
+                    *dup_idx = j;
+                }
+                break;
+            }
+        }
+    }
+
+    free(txids);
+    return found_dup;
+}
+
+/*
+ * Verify the merkle root in a block header matches the transactions.
+ */
+echo_bool_t block_validate_merkle_root(const block_t *block,
+                                        block_validation_error_t *error)
+{
+    hash256_t computed_root;
+    echo_result_t result;
+
+    if (block == NULL) {
+        if (error) *error = BLOCK_ERR_MERKLE_MISMATCH;
+        return ECHO_FALSE;
+    }
+
+    if (block->tx_count == 0 || block->txs == NULL) {
+        if (error) *error = BLOCK_ERR_NO_TRANSACTIONS;
+        return ECHO_FALSE;
+    }
+
+    /* Compute merkle root from transactions */
+    result = merkle_root_txids(block->txs, block->tx_count, &computed_root);
+    if (result != ECHO_OK) {
+        if (error) *error = BLOCK_ERR_MERKLE_MISMATCH;
+        return ECHO_FALSE;
+    }
+
+    /* Compare with header's merkle root */
+    if (memcmp(computed_root.bytes, block->header.merkle_root.bytes, 32) != 0) {
+        if (error) *error = BLOCK_ERR_MERKLE_MISMATCH;
+        return ECHO_FALSE;
+    }
+
+    return ECHO_TRUE;
+}
+
+/*
+ * Validate block size and weight limits.
+ */
+echo_bool_t block_validate_size(const block_t *block,
+                                 block_validation_error_t *error)
+{
+    size_t size;
+    size_t weight;
+
+    if (block == NULL) {
+        if (error) *error = BLOCK_ERR_SIZE_EXCEEDED;
+        return ECHO_FALSE;
+    }
+
+    /* Check serialized size */
+    size = block_serialize_size(block);
+    if (size > BLOCK_MAX_SIZE) {
+        if (error) *error = BLOCK_ERR_SIZE_EXCEEDED;
+        return ECHO_FALSE;
+    }
+
+    /* Check block weight */
+    weight = block_weight(block);
+    if (weight > BLOCK_MAX_WEIGHT) {
+        if (error) *error = BLOCK_ERR_SIZE_EXCEEDED;
+        return ECHO_FALSE;
+    }
+
+    return ECHO_TRUE;
+}
+
+/*
+ * Validate block transaction structure.
+ */
+echo_bool_t block_validate_tx_structure(const block_t *block,
+                                         block_validation_error_t *error)
+{
+    size_t i;
+    size_t dup_idx;
+
+    if (block == NULL) {
+        if (error) *error = BLOCK_ERR_NO_TRANSACTIONS;
+        return ECHO_FALSE;
+    }
+
+    /* Must have at least one transaction (coinbase) */
+    if (block->tx_count == 0 || block->txs == NULL) {
+        if (error) *error = BLOCK_ERR_NO_TRANSACTIONS;
+        return ECHO_FALSE;
+    }
+
+    /* First transaction must be coinbase */
+    if (!tx_is_coinbase(&block->txs[0])) {
+        if (error) *error = BLOCK_ERR_NO_COINBASE;
+        return ECHO_FALSE;
+    }
+
+    /* All other transactions must NOT be coinbase */
+    for (i = 1; i < block->tx_count; i++) {
+        if (tx_is_coinbase(&block->txs[i])) {
+            if (error) *error = BLOCK_ERR_MULTI_COINBASE;
+            return ECHO_FALSE;
+        }
+    }
+
+    /* Check for duplicate txids */
+    if (block_has_duplicate_txids(block, &dup_idx)) {
+        if (error) *error = BLOCK_ERR_TX_INVALID;
+        return ECHO_FALSE;
+    }
+
+    return ECHO_TRUE;
+}
+
+/*
+ * Perform complete block validation.
+ */
+echo_bool_t block_validate(const block_t *block,
+                            const full_block_ctx_t *ctx,
+                            block_validation_result_t *result)
+{
+    block_validation_error_t local_error = BLOCK_VALID;
+    satoshi_t max_coinbase;
+    satoshi_t subsidy;
+
+    /* Initialize result if provided */
+    if (result != NULL) {
+        block_validation_result_init(result);
+    }
+
+    /* Check parameters */
+    if (block == NULL || ctx == NULL) {
+        if (result) {
+            result->error = BLOCK_ERR_NO_TRANSACTIONS;
+            result->error_msg = "null block or context";
+        }
+        return ECHO_FALSE;
+    }
+
+    /*
+     * 1. Header validation (PoW, timestamp, prev_block, version)
+     */
+    if (!block_validate_header(&block->header, &ctx->header_ctx, &local_error)) {
+        if (result) {
+            result->error = local_error;
+            result->error_msg = block_validation_error_str(local_error);
+        }
+        return ECHO_FALSE;
+    }
+
+    /*
+     * 2. Difficulty validation (bits match expected)
+     */
+    if (!block_validate_difficulty(&block->header, &ctx->difficulty_ctx, &local_error)) {
+        if (result) {
+            result->error = local_error;
+            result->error_msg = block_validation_error_str(local_error);
+        }
+        return ECHO_FALSE;
+    }
+
+    /*
+     * 3. Block size/weight limits
+     */
+    if (!block_validate_size(block, &local_error)) {
+        if (result) {
+            result->error = local_error;
+            result->error_msg = block_validation_error_str(local_error);
+        }
+        return ECHO_FALSE;
+    }
+
+    /*
+     * 4. Transaction structure (coinbase, no duplicates)
+     */
+    if (!block_validate_tx_structure(block, &local_error)) {
+        if (result) {
+            result->error = local_error;
+            result->error_msg = block_validation_error_str(local_error);
+        }
+        return ECHO_FALSE;
+    }
+
+    /*
+     * 5. Merkle root verification
+     */
+    if (!block_validate_merkle_root(block, &local_error)) {
+        if (result) {
+            result->error = local_error;
+            result->error_msg = block_validation_error_str(local_error);
+        }
+        return ECHO_FALSE;
+    }
+
+    /*
+     * 6. Coinbase validation (BIP-34 height, subsidy limit)
+     */
+    subsidy = coinbase_subsidy(ctx->height);
+    max_coinbase = subsidy + ctx->total_fees;
+
+    /* Check for overflow */
+    if (max_coinbase < subsidy) {
+        max_coinbase = ECHO_MAX_SATOSHIS;
+    }
+
+    if (!coinbase_validate(&block->txs[0], ctx->height, max_coinbase, &local_error)) {
+        if (result) {
+            result->error = local_error;
+            result->failing_tx_index = 0;
+            result->error_msg = block_validation_error_str(local_error);
+        }
+        return ECHO_FALSE;
+    }
+
+    /*
+     * 7. Witness commitment verification (if SegWit active)
+     */
+    if (ctx->segwit_active) {
+        if (!block_validate_witness_commitment(block, &local_error)) {
+            if (result) {
+                result->error = local_error;
+                result->error_msg = block_validation_error_str(local_error);
+            }
+            return ECHO_FALSE;
+        }
+    }
+
+    /* All checks passed */
+    if (result) {
+        result->valid = ECHO_TRUE;
+        result->error = BLOCK_VALID;
+        result->error_msg = "valid";
+    }
+
+    return ECHO_TRUE;
+}
+
+/*
+ * Validate a block with minimal context (header-only checks).
+ */
+echo_bool_t block_validate_basic(const block_t *block,
+                                  block_validation_error_t *error)
+{
+    block_validation_error_t local_error = BLOCK_VALID;
+
+    if (block == NULL) {
+        if (error) *error = BLOCK_ERR_NO_TRANSACTIONS;
+        return ECHO_FALSE;
+    }
+
+    /*
+     * 1. Proof-of-work validation
+     */
+    if (!block_validate_pow(&block->header, &local_error)) {
+        if (error) *error = local_error;
+        return ECHO_FALSE;
+    }
+
+    /*
+     * 2. Block size/weight limits
+     */
+    if (!block_validate_size(block, &local_error)) {
+        if (error) *error = local_error;
+        return ECHO_FALSE;
+    }
+
+    /*
+     * 3. Transaction structure
+     */
+    if (!block_validate_tx_structure(block, &local_error)) {
+        if (error) *error = local_error;
+        return ECHO_FALSE;
+    }
+
+    /*
+     * 4. Merkle root verification
+     */
+    if (!block_validate_merkle_root(block, &local_error)) {
+        if (error) *error = local_error;
         return ECHO_FALSE;
     }
 

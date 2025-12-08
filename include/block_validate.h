@@ -618,4 +618,178 @@ echo_bool_t coinbase_validate(const tx_t *coinbase, uint32_t height,
  */
 echo_bool_t coinbase_is_mature(uint32_t coinbase_height, uint32_t current_height);
 
+/*
+ * ============================================================================
+ * Full Block Validation (Session 5.4)
+ * ============================================================================
+ */
+
+/*
+ * Full block validation context.
+ *
+ * Extends the header validation context with additional information
+ * needed for complete block validation.
+ */
+typedef struct {
+    /* Header validation context */
+    block_validation_ctx_t header_ctx;
+
+    /* Difficulty context (for difficulty validation) */
+    difficulty_ctx_t difficulty_ctx;
+
+    /* Block height (same as header_ctx.height, for convenience) */
+    uint32_t height;
+
+    /* Total fees available from block transactions.
+     * For full validation, this is sum(inputs) - sum(outputs) for all non-coinbase txs.
+     * Set to 0 if not computing (subsidy-only validation). */
+    satoshi_t total_fees;
+
+    /* Whether this is a SegWit-active block */
+    echo_bool_t segwit_active;
+
+} full_block_ctx_t;
+
+/*
+ * Block validation result with detailed information.
+ */
+typedef struct {
+    /* Overall validation result */
+    echo_bool_t valid;
+
+    /* Specific error code */
+    block_validation_error_t error;
+
+    /* Index of failing transaction (if error is TX_INVALID or similar) */
+    size_t failing_tx_index;
+
+    /* Additional error information (for debugging) */
+    const char *error_msg;
+
+} block_validation_result_t;
+
+/*
+ * Initialize a full block validation context.
+ *
+ * Parameters:
+ *   ctx - Context to initialize
+ */
+void full_block_ctx_init(full_block_ctx_t *ctx);
+
+/*
+ * Initialize a block validation result.
+ *
+ * Parameters:
+ *   result - Result to initialize
+ */
+void block_validation_result_init(block_validation_result_t *result);
+
+/*
+ * Check if a block has any duplicate transaction IDs.
+ *
+ * Duplicate txids are not allowed in a block.
+ *
+ * Parameters:
+ *   block    - Block to check
+ *   dup_idx  - Output: index of first duplicate (may be NULL)
+ *
+ * Returns:
+ *   ECHO_TRUE if duplicates found, ECHO_FALSE if all txids unique
+ */
+echo_bool_t block_has_duplicate_txids(const block_t *block, size_t *dup_idx);
+
+/*
+ * Verify the merkle root in a block header matches the transactions.
+ *
+ * Parameters:
+ *   block - Block to validate
+ *   error - Output: specific error (may be NULL)
+ *
+ * Returns:
+ *   ECHO_TRUE if merkle root matches, ECHO_FALSE otherwise
+ */
+echo_bool_t block_validate_merkle_root(const block_t *block,
+                                        block_validation_error_t *error);
+
+/*
+ * Validate block size and weight limits.
+ *
+ * Checks:
+ *   - Block size <= 4MB (serialized size)
+ *   - Block weight <= 4M weight units
+ *
+ * Parameters:
+ *   block - Block to validate
+ *   error - Output: specific error (may be NULL)
+ *
+ * Returns:
+ *   ECHO_TRUE if within limits, ECHO_FALSE if exceeded
+ */
+echo_bool_t block_validate_size(const block_t *block,
+                                 block_validation_error_t *error);
+
+/*
+ * Validate block transaction structure.
+ *
+ * Checks:
+ *   - Block has at least one transaction
+ *   - First transaction is coinbase
+ *   - All other transactions are non-coinbase
+ *   - No duplicate transaction IDs
+ *
+ * Parameters:
+ *   block  - Block to validate
+ *   error  - Output: specific error (may be NULL)
+ *
+ * Returns:
+ *   ECHO_TRUE if structure is valid, ECHO_FALSE otherwise
+ */
+echo_bool_t block_validate_tx_structure(const block_t *block,
+                                         block_validation_error_t *error);
+
+/*
+ * Perform complete block validation.
+ *
+ * This is the main entry point for full block validation. It performs:
+ *   1. Header validation (PoW, timestamp, prev_block, version)
+ *   2. Difficulty validation (bits match expected)
+ *   3. Block size/weight limits
+ *   4. Transaction structure (coinbase, no duplicates)
+ *   5. Merkle root verification
+ *   6. Coinbase validation (BIP-34 height, subsidy limit)
+ *   7. Witness commitment verification (if SegWit active)
+ *
+ * Note: This does NOT validate individual transaction scripts or
+ * UTXO availability—that requires the UTXO set from Phase 6.
+ *
+ * Parameters:
+ *   block  - Block to validate
+ *   ctx    - Full validation context
+ *   result - Output: detailed validation result
+ *
+ * Returns:
+ *   ECHO_TRUE if block passes all checks, ECHO_FALSE otherwise
+ */
+echo_bool_t block_validate(const block_t *block,
+                            const full_block_ctx_t *ctx,
+                            block_validation_result_t *result);
+
+/*
+ * Validate a block with minimal context (header-only checks).
+ *
+ * This performs only the checks that don't require chain context:
+ *   - Header validation (PoW, basic timestamp)
+ *   - Block structure (coinbase, size)
+ *   - Merkle root
+ *
+ * Parameters:
+ *   block  - Block to validate
+ *   error  - Output: specific error (may be NULL)
+ *
+ * Returns:
+ *   ECHO_TRUE if block passes basic checks, ECHO_FALSE otherwise
+ */
+echo_bool_t block_validate_basic(const block_t *block,
+                                  block_validation_error_t *error);
+
 #endif /* ECHO_BLOCK_VALIDATE_H */
