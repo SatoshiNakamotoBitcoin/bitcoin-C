@@ -30,7 +30,7 @@
 #define ECHO_PROTOCOL_VERSION 70016
 
 /* User agent string for version messages */
-#define ECHO_USER_AGENT "/BitcoinEcho:0.0.1/"
+#define ECHO_USER_AGENT "/Bitcoin-C:0.0.1/"
 
 /*
  * Network selection.
