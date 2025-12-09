@@ -1,5 +1,5 @@
 /*
- * Bitcoin Echo — Compile-Time Configuration
+ * Bitcoin-C — Compile-Time Configuration
  *
  * All configuration is compile-time. There are no configuration files,
  * no command-line flags, no runtime policy changes. The node behaves
@@ -23,14 +23,14 @@
  */
 #define ECHO_VERSION_MAJOR 0
 #define ECHO_VERSION_MINOR 0
-#define ECHO_VERSION_PATCH 1
-#define ECHO_VERSION_STRING "0.0.1"
+#define ECHO_VERSION_PATCH 7
+#define ECHO_VERSION_STRING "0.0.7"
 
 /* Protocol version we speak */
 #define ECHO_PROTOCOL_VERSION 70016
 
 /* User agent string for version messages */
-#define ECHO_USER_AGENT "/Bitcoin-C:0.0.1/"
+#define ECHO_USER_AGENT "/Bitcoin-C:0.0.7/"
 
 /*
  * Network selection.
