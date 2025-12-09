@@ -101,7 +101,7 @@
 #define ECHO_MAX_BLOCK_SIZE         1000000
 
 /* Maximum script size (bytes) */
-#define ECHO_MAX_SCRIPT_SIZE        10000
+#define ECHO_MAX_SCRIPT_SIZE        83
 
 /* Maximum script element size (bytes) */
 #define ECHO_MAX_SCRIPT_ELEMENT     520
