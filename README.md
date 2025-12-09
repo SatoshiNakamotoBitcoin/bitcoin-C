@@ -1,45 +1,8 @@
-# Bitcoin Echo
+# Bitcoin-C
 
 A complete, ossified implementation of the Bitcoin protocol in pure C.
 
 *Build once. Build right. Stop.*
-
-## Status
-
-**Phase 5: Block Validation** — Complete
-
-| Component | Status |
-|-----------|--------|
-| **Cryptography** | |
-| SHA-256 | Complete |
-| RIPEMD-160 | Complete |
-| secp256k1 (Field/Group) | Complete |
-| ECDSA Verification | Complete |
-| Schnorr (BIP-340) | Complete |
-| **Data Structures** | |
-| Serialization | Complete |
-| Transactions | Complete |
-| Blocks | Complete |
-| Merkle Trees | Complete |
-| **Script Interpreter** | |
-| Stack Operations | Complete |
-| Arithmetic/Logic Opcodes | Complete |
-| Crypto Opcodes | Complete |
-| Flow Control | Complete |
-| P2SH Support | Complete |
-| Timelocks (BIP-65/68/112) | Complete |
-| Signature Verification | Complete |
-| **Transaction Validation** | |
-| Syntactic Validation | Complete |
-| Script Execution | Complete |
-| UTXO Context | Complete |
-| **Block Validation** | |
-| Header Validation (PoW, MTP) | Complete |
-| Difficulty Adjustment | Complete |
-| Coinbase Validation | Complete |
-| Full Block Validation | Complete |
-
-Next: [Phase 6 — Chain Selection](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/ROADMAP.md#phase-6-consensus-engine--chain-selection)
 
 ## Building
 
@@ -69,14 +32,6 @@ Runs all unit tests for cryptographic primitives, data structures, and script ex
 
 - C11 compiler (GCC, Clang, or MSVC)
 - No external dependencies
-
-## Documentation
-
-- [Whitepaper](https://bitcoinecho.org/docs/whitepaper) — Technical specification
-- [Manifesto](https://bitcoinecho.org/docs/manifesto) — Philosophical foundation
-- [Bitcoin Primer](https://bitcoinecho.org/docs/primer) — What is Bitcoin?
-- [Building Guide](https://bitcoinecho.org/docs/building) — Compilation for the future
-- [Roadmap](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/ROADMAP.md) — Detailed implementation progress
 
 ## License
 
