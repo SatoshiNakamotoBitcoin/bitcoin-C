@@ -1,6 +1,6 @@
 # Bitcoin-C
 
-A complete, ossified implementation of the Bitcoin protocol in pure C.
+Implementation of the Bitcoin protocol in pure C but with 83 bytes instead 10000.
 
 *Build once. Build right. Stop.*
 
